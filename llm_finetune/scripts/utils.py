@@ -29,6 +29,7 @@ def create_datasets(tokenizer, args):
     dataset = load_dataset(
         args.dataset_name,
         args.dataset_config_name,
+        cache_dir=args.cache_dir,
         use_auth_token=True,
         num_proc=args.num_workers,
     )
@@ -53,7 +54,11 @@ def create_datasets(tokenizer, args):
                     f"### {example['input'][i]}\n ### The answer is:\n {example['output'][i]}{tokenizer.eos_token}"
                 )
 
-        input_ids = tokenizer(output_texts).input_ids
+
+        #input_ids = tokenizer(output_texts).input_ids
+        input_ids = tokenizer(
+            output_texts, padding="max_length", max_length=args.max_seq_length
+        ).input_ids
 
         if eval:
             labels_ids = tokenizer(mask_labels_sizes).input_ids
@@ -65,7 +70,7 @@ def create_datasets(tokenizer, args):
                 masked_labels.append(ml)
             return {"input_ids": input_ids, "labels": masked_labels}
         else:
-            return {"input_ids": input_ids}
+            return {"input_ids": input_ids, "labels": input_ids.copy()}
 
     train_dataset = train_dataset.map(
         tokenize_function,
@@ -127,34 +132,62 @@ def create_datasets(tokenizer, args):
     return train_dataset, valid_dataset
 
 
-def create_and_prepare_model(args):
+def create_and_prepare_model(script_args, training_args):
+
     device_map = None
+    bnb_config = None
+    load_in_8bit = script_args.use_8bit_qunatization
+
+    if script_args.use_4bit_qunatization:
+        compute_dtype = getattr(torch, script_args.bnb_4bit_compute_dtype)
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=script_args.use_4bit_qunatization,
+            bnb_4bit_quant_type=script_args.bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=script_args.use_nested_quant,
+        )
+
+        if compute_dtype == torch.float16 and script_args.use_4bit_qunatization:
+            major, _ = torch.cuda.get_device_capability()
+            if major >= 8:
+                print("=" * 80)
+                print(
+                    "Your GPU supports bfloat16, you can accelerate training with the argument --bf16"
+                )
+                print("=" * 80)
+
+    if script_args.use_4bit_qunatization or script_args.use_8bit_qunatization:
+        device_map = "auto"  # {"": 0}
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
+        script_args.model_path,
+        load_in_8bit=load_in_8bit,
+        quantization_config=bnb_config,
         device_map=device_map,
-        use_cache=not args.use_gradient_checkpointing,
+        use_cache=not training_args.gradient_checkpointing,
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        use_flash_attention_2=True if script_args.use_flash_attn else False,
         torch_dtype=torch.bfloat16,
         max_position_embeddings=8192,
     )
-
+    model.generation_config.attn_softmax_bf16 = True
+    model.generation_config.use_flash_attention = True
     peft_config = None
-    if args.use_peft_lora:
+    if script_args.use_peft_lora:
         peft_config = LoraConfig(
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            r=args.lora_r,
+            lora_alpha=script_args.lora_alpha,
+            lora_dropout=script_args.lora_dropout,
+            r=script_args.lora_r,
             bias="none",
             task_type="CAUSAL_LM",
             target_modules=(
                 None
-                if args.lora_target_modules is None
-                else args.lora_target_modules.split(",")
+                if script_args.lora_target_modules is None
+                else script_args.lora_target_modules.split(",")
             ),
         )
-        if args.use_gradient_checkpointing:
+        if training_args.gradient_checkpointing:
             model.gradient_checkpointing_enable()
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
