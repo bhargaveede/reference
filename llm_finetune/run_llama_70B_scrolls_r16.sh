@@ -1,5 +1,5 @@
 accelerate launch --config_file configs/default_config.yaml scripts/train.py \
---model_name meta-llama/Llama-2-70b-hf \
+--model_name /mnt/weka/data/pytorch/llama2/Llama-2-70b-hf \
 --dataset_name "tau/scrolls" --dataset_config_name "gov_report" \
 --max_seq_len 8192 \
 --bf16 True \
@@ -20,5 +20,7 @@ accelerate launch --config_file configs/default_config.yaml scripts/train.py \
 --lora_dropout 0.1 \
 --max_steps 288 \
 --use_flash_attn \
---seed "$1" \
+--seed 42 \
+--use_habana \
+--use_lazy_mode \
 --lora_target_modules "q_proj,v_proj,k_proj,o_proj"
