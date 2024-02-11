@@ -274,6 +274,7 @@ def create_and_prepare_model(script_args, training_args):
     )
     model.generation_config.attn_softmax_bf16 = True
     model.generation_config.use_flash_attention = True
+    model.generation_config.flash_attention_recompute = True
     peft_config = None
     if script_args.use_peft_lora:
         peft_config = LoraConfig(
