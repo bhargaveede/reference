@@ -6,6 +6,8 @@ from tqdm import tqdm
 import warnings
 from peft import LoraConfig, get_peft_model,prepare_model_for_kbit_training
 import yaml
+from deepspeed.accelerator import get_accelerator
+
 
 from peft.tuners.lora import LoraLayer
 from transformers import (
@@ -17,9 +19,27 @@ from transformers import (
     TrainerState,
     TrainerControl,
 )
+from transformers.utils import (
+    is_sagemaker_mp_enabled,
+    is_apex_available,
+    #get_accelerator,
+)
+if is_apex_available():
+    from apex import amp
+
+if is_sagemaker_mp_enabled():
+    import smdistributed.modelparallel.torch as smp
+    from smdistributed.modelparallel import __version__ as SMP_VERSION
+
+    IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
+
+    from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
+else:
+    IS_SAGEMAKER_MP_POST_1_10 = False
+
 from itertools import chain
 from functools import partial
-
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 class SaveDeepSpeedPeftModelCallback(TrainerCallback):
     def __init__(self, trainer, save_steps=500):
@@ -286,9 +306,78 @@ def create_and_prepare_model(script_args, training_args):
         device_map = "auto"  # {"": 0}
 
     model = AutoModelForCausalLM.from_pretrained(
-        script_args.model_name,
+        'regisss/llama2-70b-fused-qkv-mlperf',
         load_in_8bit=load_in_8bit,
         quantization_config=bnb_config,
+        device_map=device_map,
+        use_cache=not training_args.gradient_checkpointing,
+        trust_remote_code=True,
+        use_flash_attention_2=True if script_args.use_flash_attn else False,
+        torch_dtype=torch.bfloat16,
+    )
+    model.generation_config.attn_softmax_bf16 = True
+    model.generation_config.use_flash_attention = True
+    model.generation_config.flash_attention_recompute = True
+
+    peft_config = None
+    if script_args.use_peft_lora:
+        peft_config = LoraConfig(
+            lora_alpha=script_args.lora_alpha,
+            lora_dropout=script_args.lora_dropout,
+            r=script_args.lora_r,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=None
+            if script_args.lora_target_modules is None
+            else script_args.lora_target_modules.split(","),
+        )
+        if training_args.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+
+    tokenizer = AutoTokenizer.from_pretrained(script_args.model_name, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    return model, peft_config, tokenizer
+
+def training_step(self, model: torch.nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    """
+    Perform a training step on a batch of inputs.
+    Subclass and override to inject custom behavior.
+    Args:
+        model (`nn.Module`):
+            The model to train.
+        inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+            The inputs and targets of the model.
+            The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+            argument `labels`. Check your model's documentation for all accepted arguments.
+    Return:
+        `torch.Tensor`: The tensor with training loss on this batch.
+    """
+    model.train()
+    inputs = self._prepare_inputs(inputs)
+    if is_sagemaker_mp_enabled():
+        loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
+        return loss_mb.reduce_mean().detach().to(self.args.device)
+    with self.compute_loss_context_manager():
+        loss = self.compute_loss(model, inputs)
+    if self.args.n_gpu > 1:
+        loss = loss.mean()  # mean() to average on multi-gpu parallel training
+    if self.use_apex:
+        with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+            scaled_loss.backward()
+    else:
+        self.accelerator.backward(loss)
+    get_accelerator().empty_cache()
+    return loss.detach() / self.args.gradient_accumulation_steps
+
+
+def create_and_prepare_model_unfuse(script_args):
+    device_map = None
+
+    model = AutoModelForCausalLM.from_pretrained(
+        script_args.model_name,
         device_map=device_map,
         use_cache=not training_args.gradient_checkpointing,
         trust_remote_code=True,
@@ -320,7 +409,6 @@ def create_and_prepare_model(script_args, training_args):
     tokenizer.pad_token = tokenizer.eos_token
 
     return model, peft_config, tokenizer
-
 
 def peft_module_casting_to_bf16(model, args):
     for name, module in model.named_modules():
