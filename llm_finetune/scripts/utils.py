@@ -196,13 +196,13 @@ def create_datasets(tokenizer, args):
     train_dataset = train_dataset.map(
         tokenize_function,
         batched=True,
-        num_proc=8,
+        num_proc=1,
         remove_columns=column_names,
     )
     valid_dataset = valid_dataset.map(
         partial(tokenize_function,eval=True),
         batched=True,
-        num_proc=2,
+        num_proc=1,
         remove_columns=column_names,
     )
 
@@ -219,14 +219,14 @@ def create_datasets(tokenizer, args):
         filter_function,
         batched=True,
         # with_indices=True,
-        num_proc=8,
+        num_proc=1,
         # remove_columns=column_names,
     )
     valid_dataset = valid_dataset.filter(
         filter_function,
         batched=True,
         # with_indices=True,
-        num_proc=2,
+        num_proc=1,
         # remove_columns=column_names,
     )
     print(
@@ -238,12 +238,12 @@ def create_datasets(tokenizer, args):
     train_dataset = train_dataset.map(
         packing_method,
         batched=True,
-        num_proc=8,
+        num_proc=1,
     )
     valid_dataset = valid_dataset.map(
         packing_method,
         batched=True,
-        num_proc=2,
+        num_proc=1,
     )
 
     print(
