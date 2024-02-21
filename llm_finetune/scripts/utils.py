@@ -306,7 +306,7 @@ def create_and_prepare_model(script_args, training_args):
         device_map = "auto"  # {"": 0}
 
     model = AutoModelForCausalLM.from_pretrained(
-        'regisss/llama2-70b-fused-qkv-mlperf',
+        script_args.model_path,
         load_in_8bit=load_in_8bit,
         quantization_config=bnb_config,
         device_map=device_map,
