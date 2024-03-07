@@ -85,7 +85,7 @@ class ScriptArguments:
         default=0.92, metadata={"help": "target eval loss - NOT FINAL."}
     )
     use_flash_attn: Optional[bool] = field(
-        default=True,
+        default=False,
         metadata={"help": "Enables Flash attention for training."},
     )
     use_peft_lora: Optional[bool] = field(
@@ -147,7 +147,7 @@ def main(script_args, training_args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        callbacks=[MLPerfCallback(loralogger, len(train_dataset), len(eval_dataset),args.lora_alpha)],
+        callbacks=[MLPerfCallback(loralogger, len(train_dataset), len(eval_dataset),script_args.lora_alpha)],
     )
     trainer.accelerator.print(f"{trainer.model}")
     if script_args.use_peft_lora:
